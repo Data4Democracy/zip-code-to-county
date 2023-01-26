@@ -1,125 +1,149 @@
+from pathlib import Path
+from datetime import datetime
+
 import requests
-import os
 import time
 import pandas as pd
-import glob
-import datetime as dt
 
-def verify_dirs_exist():
-    #This notebook requires a few directories
-    dirs = ["download", "download\csv", "download\excel"]
-    for d in dirs:
-        curpath = os.path.abspath(os.curdir) # get current working directory
-        full_path = os.path.join(curpath, d) # join cwd with proposed d
-        create_dir_if_not_exists(full_path)
+ROOT = Path(__file__).parent
+DATA_DIR = ROOT / "data"
+DOWNLOADS_DIR = DATA_DIR / "downloads"
+HUD_DIR = DOWNLOADS_DIR / "hud"
 
-def create_dir_if_not_exists(full_path):
-    # expects a full path to the directory to test against or to create.
-    if not os.path.exists(full_path):
-        os.makedirs(full_path)
-        print("Created directory ", full_path)
-    else:
-        print("Directory ", full_path, " already existed")
+HUD_URL_FMT = "https://www.huduser.gov/portal/datasets/usps/ZIP_COUNTY_{}.xlsx"
+CENSUS_FIPS_URL = "https://www2.census.gov/geo/docs/reference/codes/files/national_county.txt"
 
-def generate_file_name_from_url(url):
-    month_year = url.split("\\")[-1].split("_")[-1].split(".")[0]
-    month = month_year[:2]
-    year = month_year[2:]
-    new_file_name = "ZIP-COUNTY-FIPS_"+year + "-" + month
-    return new_file_name
+# the FIPS data does not come with column names
+CENSUS_DATA_COL_NAMES = ["STATE", "STATEFP", "COUNTYFP", "COUNTYNAME", "CLASSFP"]
 
-def get_file_path(url, csv_file=False):
-    "Takes in the full url and returns the full file path"
-    "File names are ZIP_COUNTY_032010.xlsx"
-    curpath = os.path.abspath(os.curdir) #get current working directory
-    full_path = ''
-    if csv_file:
-        #If we are passing in a csv, change xlsx to .csv
-        csv_file_name = url.split("\\")[-1][:-5] + ".csv"
-        full_path = os.path.join(curpath, "download\csv", csv_file_name)
-    else:
-        url_name = url.split('/')[-1] # gets file name
-        #switching file names to be YYYY-MM for better file management
-        url_file_name = generate_file_name_from_url(url) + ".xlsx"
-        full_path = os.path.join(curpath, "download\excel", url_file_name)
-    return full_path
 
-def download_file(url):
-    #With a full url, downloads the full file in chunks.
-    #Able to handle large files.
-    full_file_path = get_file_path(url)
-    r = requests.get(url)
-    with open(full_file_path, 'wb') as f:
-        for chunk in r.iter_content(chunk_size=1024):
-            if chunk: # filter out keep-alive new chunks
+def verify_downloads_dir_exists() -> None:
+    paths = [DATA_DIR, DOWNLOADS_DIR, HUD_DIR]
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def remove_downloads_dir() -> None:
+    def rmtree(path: Path) -> None:
+        if path.is_file():
+            path.unlink(missing_ok=True)
+        else:
+            files = list(path.iterdir())
+            for child in files:
+                rmtree(child)
+
+            path.rmdir()
+
+    rmtree(DOWNLOADS_DIR)
+
+
+def process_hud_file(path: Path) -> pd.DataFrame:
+    """Return processed HUD file as dataframe"""
+
+    df = pd.read_excel(
+        path,
+        index_col=None,
+        # some file have lowercase column names
+        converters={"ZIP": str, "COUNTY": str, "zip": str, "county": str},
+    )
+
+    df.columns = df.columns.str.upper()
+
+    # rename County column for easier merging.
+    df = df.rename(columns={"COUNTY": "STCOUNTYFP"})
+
+    # keep the two columns we need
+    df = df[["ZIP", "STCOUNTYFP"]]
+
+    return df
+
+def process_census_fips_file(path: Path) -> pd.DataFrame:
+    """Return processed Census FIPS as dataframe"""
+
+    df = pd.read_csv(path,
+        names=CENSUS_DATA_COL_NAMES,
+        converters={"STATEFP": str, "COUNTYFP": str, "CLASSFP": str}
+    )
+
+    # Combine State & County FP to generate the full FIPS code for easier lookup
+    df["STCOUNTYFP"] = df["STATEFP"] + df["COUNTYFP"]
+
+    # Drop STATFP & COUNTYFP as we no longer need them
+    df = df[["STCOUNTYFP", "STATE" ,"COUNTYNAME"]]
+
+    return df
+
+
+def download_file(url: str, file_name: Path | None= None) -> Path:
+    """Download a file."""
+
+    file_name = file_name or Path(url.split("/")[-1])
+
+    resp = requests.get(url)
+
+    if resp.status_code >= 400:
+        raise RuntimeError("Error downloading file.")
+
+    with file_name.open("wb") as f:
+        for chunk in resp.iter_content(chunk_size=1024):
+            # filter out keep-alive new chunks
+            if chunk:
                 f.write(chunk)
-    return full_file_path
 
-"""
-Census State & County FIPS Data
-HUD uses ZIP & FIPS data. We need to grab the FIPS to county
-name data to be able to merge and create the cross lookup
-"""
+    return file_name
 
-census_fips_url = "https://www2.census.gov/geo/docs/reference/codes/files/national_county.txt"
-#the FIPS data does not come with column names
-census_col_names = ["STATE","STATEFP","COUNTYFP","COUNTYNAME","CLASSFP"]
 
-# Open url, read in the data with the column names, and convert specific columns to str.
-# When Pandas reads these columns, it automatilcally intrepets them as INTS
-fips_df = pd.read_table(
-    census_fips_url,
-    sep=",",
-    names=census_col_names,
-    converters={'STATEFP': str,'COUNTYFP': str,'CLASSFP': str}
-)
+def main():
+    # the beginning of hud year data
+    # START_YEAR = 2010
+    START_YEAR = 2021
+    # hud files are based on quarters
+    MONTHS = ["03", "06", "09", "12"]
+    KEEP_DOWNLOADS = True
 
-# Combine State & County FP to generate the full FIPS code for easier lookup
-fips_df["STCOUNTYFP"] = fips_df["STATEFP"] + fips_df["COUNTYFP"]
-#Dropping STATFP & COUNTYFP as we no longer need them
-fips_df = fips_df[["STCOUNTYFP", "STATE" ,"COUNTYNAME", "CLASSFP"]]
+    # Get current year to handle future runs of this file
+    cur_year = datetime.now().year
 
-# Get current year to handle future runs of this file
-now = dt.datetime.now()
-cur_year = now.year
+    file_name = CENSUS_FIPS_URL.split("/")[-1]
+    fips_file = download_file(
+        CENSUS_FIPS_URL,
+        file_name=(DOWNLOADS_DIR / file_name).with_suffix(".csv")
+    )
+    fips_df = process_census_fips_file(fips_file)
 
-def get_files_url(month, year):
-    monthyear = month + str(year)
-    return "https://www.huduser.gov/portal/datasets/usps/ZIP_COUNTY_{}.xlsx".format(monthyear)
+    for year in range(START_YEAR, cur_year + 1):
+        for month in MONTHS:
+            hud_url = HUD_URL_FMT.format(f"{month}{year}")
+            file_name = hud_url.split("/")[-1]
 
-"""
-Main loop
-"""
-def main()
-    # from the beginning of hud year data to current year
-    for year in range(2010, cur_year+1):
-        #hud files are based on quarters
-        for month in ["03", "06", "09", "12"]:
-            #generate the HUDs url
-            url = get_files_url(month, year)
-            #download the file
-            full_file_path = download_file(url)
-            #open and get the excel dataframe
-            excel_df = process_excel_file(full_file_path)
-            #merge the excel file with the fips data
-            merged_df = fips_df.merge(excel_df)
-            #reduce the dataframe down to specific columns
-            merged_df = merged_df[["ZIP", "COUNTYNAME", "STATE", "STCOUNTYFP", "CLASSFP"]]
-            #generate a csv file path
-            csv_path = get_file_path(full_file_path, True)
-            print(csv_path)
             try:
-                merged_df.to_csv(csv_path, encoding='utf-8', index=False)
-            except:
-                #once we get to a Q that hasn't happened yet, we'll get an XLDRerror
-                print("Operation has completed")
-                break
+                hud_file = download_file(hud_url, file_name=HUD_DIR / file_name)
+            except RuntimeError as e:
+                if "Error downloading file." in str(e):
+                    # once we get to a Q that hasn't happened yet, we'll get an XLDRerror
+                    print(f"No data for {year}-{month}")
+                    break
+                else:
+                    raise
+
+            excel_df = process_hud_file(hud_file)
+
+            csv_path = DATA_DIR / f"zip_to_county_{year}_{month}.csv"
+
+            merged_df = fips_df.merge(excel_df)
+            # keep specific columns
+            merged_df = merged_df[["ZIP", "COUNTYNAME", "STATE", "STCOUNTYFP"]]
+            merged_df.to_csv(csv_path, encoding="utf-8", index=False)
 
             # prevent from overloading the HUD site and to be a nice visitor
             time.sleep(1)
-            print("Completed ", csv_path)
+            print(f"Completed {csv_path}")
+
+    if not KEEP_DOWNLOADS:
+        print("Removing downloaded files.")
+        remove_downloads_dir()
 
 
 if __name__ == '__main__':
-    verify_dirs_exist()
+    verify_downloads_dir_exists()
     main()

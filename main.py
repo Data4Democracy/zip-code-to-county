@@ -128,7 +128,7 @@ def main():
 
             excel_df = process_hud_file(hud_file)
 
-            csv_path = DATA_DIR / f"zip_to_county_{year}_{month}.csv"
+            csv_path = DATA_DIR / f"zip_county_state_{year}_{month}.csv"
 
             merged_df = fips_df.merge(excel_df)
             # keep specific columns

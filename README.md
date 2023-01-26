@@ -1,8 +1,9 @@
-## ZIP Code, FIPS State County, & County, State CSV Code
+# Zip, County, State, State-County FIPS Codes
 
-This is the code that generated the data that lives on [Data.World](https://data.world/niccolley/us-zipcode-to-county-state). 
+forked from
+[Data4Democracy/zip-code-to-county](https://github.com/Data4Democracy/zip-code-to-county)
 
+**Requires: Python 3.11+**
 
-Built Using:
-
-Python 3, Jupyter Notebooks, Requests, & Pandas
+Produces files `zip_county_state_{year}_{month}.csv` mapping zip to county to
+state codes.
